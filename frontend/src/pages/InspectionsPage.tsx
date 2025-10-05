@@ -13,6 +13,7 @@ interface Inspection {
   maintenanceDate?: string | "-";
   status: Status;
   favorite?: boolean;
+  inferenceThreshold?: number;
 }
 
 interface TransformerMeta {

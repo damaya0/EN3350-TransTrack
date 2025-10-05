@@ -8,6 +8,7 @@ export type InspectionDTO = {
     inspectionDate: string;        // "YYYY-MM-DD"
     inspectionTime: string;        // "HH:mm:ss"
     createdAt: string;             // ISO
+    inferenceThreshold?: number;
   };
   
   const BASE = import.meta.env.VITE_API_BASE ?? ""; 

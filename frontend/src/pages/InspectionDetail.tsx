@@ -12,8 +12,6 @@ function authHeaders(): Record<string, string> {
   return h; // always a simple object of string->string
 }
 
-
-
 /* ---------- Types ---------- */
 type Status = "Completed" | "In Progress" | "Pending";
 type ImageType = "BASELINE" | "MAINTENANCE";
@@ -27,6 +25,7 @@ type InspectionDTO = {
   inspectionDate: string;
   inspectionTime: string;
   createdAt: string;
+  inferenceThreshold?: number;
 };
 
 type ImageMeta = {
@@ -89,6 +88,11 @@ function toNiceDateTime(d: string, t: string) {
   });
 }
 
+function clampThreshold(value: number): number {
+  if (Number.isNaN(value)) return 0;
+  return Math.min(1, Math.max(0, value));
+}
+
 function pill(status: Status): React.CSSProperties {
   if (status === "Completed")
     return { display: "inline-flex", padding: "6px 12px", borderRadius: 999, fontWeight: 800, background: ui.okBg, color: ui.ok };
@@ -148,6 +152,12 @@ export default function InspectionDetail() {
     lastUpdated: "-",
   });
 
+  const [inspection, setInspection] = useState<InspectionDTO | null>(null);
+  const [temperature, setTemperature] = useState<number | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
+
   const [baselineMeta, setBaselineMeta] = useState<ImageMeta | null>(null);
   const [baselineUrl, setBaselineUrl] = useState<string | null>(null);
   const [baselineOwnerInspectionId, setBaselineOwnerInspectionId] = useState<number | null>(null);
@@ -179,21 +189,25 @@ export default function InspectionDetail() {
             status: fromState.status as Status,
             lastUpdated: fromState.inspectedDate,
           }));
-        } else {
-          const res = await fetch(api(`/inspections/${numericInspectionId}`), {
-          headers: { ...authHeaders() }, 
-        });
-          if (!res.ok) throw new Error(`Failed to load inspection ${numericInspectionId}`);
-          const dto: InspectionDTO = await res.json();
-          setHeader({
-            transformerNo: dto.transformerNo,
-            poleNo: "-",
-            branch: dto.branch,
-            inspectedBy: "-",
-            status: (dto.status as Status) || "Pending",
-            lastUpdated: toNiceDateTime(dto.inspectionDate, dto.inspectionTime),
-          });
         }
+
+        const res = await fetch(api(`/inspections/${numericInspectionId}`), {
+          headers: { ...authHeaders() },
+        });
+        if (!res.ok) throw new Error(`Failed to load inspection ${numericInspectionId}`);
+        const dto: InspectionDTO = await res.json();
+        if (cancelled) return;
+        setInspection(dto);
+        setHeader({
+          transformerNo: dto.transformerNo,
+          poleNo: "-",
+          branch: dto.branch,
+          inspectedBy: "-",
+          status: (dto.status as Status) || "Pending",
+          lastUpdated: toNiceDateTime(dto.inspectionDate, dto.inspectionTime),
+        });
+        setTemperature(typeof dto.inferenceThreshold === "number" ? clampThreshold(dto.inferenceThreshold) : null);
+
       } catch (e: any) {
         if (!cancelled) setError(e?.message ?? "Failed to load inspection");
       }
@@ -372,6 +386,90 @@ export default function InspectionDetail() {
   // shared zoom ref for maintenance image
   const zoomRef = useRef<ZoomHandle | null>(null);
   const hasMaint = Boolean(maintUrl);
+
+  const numericThreshold = (() => {
+    if (typeof temperature === "number") return clampThreshold(temperature);
+    if (typeof inspection?.inferenceThreshold === "number") return clampThreshold(inspection.inferenceThreshold);
+    return null;
+  })();
+  const sliderValue = numericThreshold ?? 0.5;
+
+  const onSliderChange = (value: string) => {
+    const num = parseFloat(value);
+    if (Number.isNaN(num)) {
+      setTemperature(null);
+      return;
+    }
+    setTemperature(clampThreshold(num));
+  };
+
+  const onNumberChange = (value: string) => {
+    if (value.trim() === "") {
+      setTemperature(null);
+      return;
+    }
+    const num = Number(value);
+    if (Number.isNaN(num)) return;
+    setTemperature(clampThreshold(num));
+  };
+
+  const onNumberBlur = () => {
+    if (typeof temperature === "number") {
+      setTemperature(clampThreshold(temperature));
+    }
+  };
+
+  const saveThreshold = useCallback(async () => {
+    if (!inspection) {
+      setSaveError("Inspection data not loaded yet");
+      return;
+    }
+    try {
+      setSaveError(null);
+      setSaveSuccess(null);
+      setSaving(true);
+      const nextThreshold =
+        typeof temperature === "number"
+          ? clampThreshold(temperature)
+          : (typeof inspection.inferenceThreshold === "number"
+              ? clampThreshold(inspection.inferenceThreshold)
+              : undefined);
+      const payload: InspectionDTO = {
+        ...inspection,
+        inferenceThreshold: nextThreshold,
+      };
+
+      const res = await fetch(api(`/inspections/${numericInspectionId}`), {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          ...authHeaders(),
+        },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error(`Failed to save inspection ${numericInspectionId}`);
+      const updated: InspectionDTO = await res.json();
+      setInspection(updated);
+      setTemperature(
+        typeof updated.inferenceThreshold === "number"
+          ? clampThreshold(updated.inferenceThreshold)
+          : null
+      );
+      setHeader({
+        transformerNo: updated.transformerNo,
+        poleNo: "-",
+        branch: updated.branch,
+        inspectedBy: "-",
+        status: (updated.status as Status) || "Pending",
+        lastUpdated: toNiceDateTime(updated.inspectionDate, updated.inspectionTime),
+      });
+      setSaveSuccess("Inference threshold saved successfully.");
+    } catch (e: any) {
+      setSaveError(e?.message ?? "Failed to save changes");
+    } finally {
+      setSaving(false);
+    }
+  }, [inspection, numericInspectionId, temperature]);
 
   /* ----- Render ----- */
   return (
@@ -553,6 +651,68 @@ export default function InspectionDetail() {
               <option value="CLOUDY">Cloudy</option>
               <option value="RAINY">Rainy</option>
             </select>
+          </div>
+
+          <div style={{ marginTop: 16 }}>
+            <label style={{ display: "block", fontWeight: 800, color: ui.sub, marginBottom: 6 }}>
+              Inference Threshold
+            </label>
+            <p style={{ margin: 0, color: ui.sub, fontSize: 12, fontWeight: 600 }}>
+              Adjust the threshold (0-1) used when running thermal inference.
+            </p>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 10 }}>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={sliderValue}
+                onChange={(e) => onSliderChange(e.target.value)}
+                style={{ flex: 1 }}
+              />
+              <input
+                type="number"
+                min={0}
+                max={1}
+                step={0.01}
+                value={numericThreshold ?? ""}
+                onChange={(e) => onNumberChange(e.target.value)}
+                onBlur={onNumberBlur}
+                style={{
+                  width: 72,
+                  padding: "8px 10px",
+                  borderRadius: 10,
+                  border: `1px solid ${ui.border}`,
+                  fontWeight: 700,
+                  textAlign: "center",
+                }}
+              />
+            </div>
+            <button
+              onClick={saveThreshold}
+              disabled={saving || !inspection}
+              style={{
+                marginTop: 12,
+                width: "100%",
+                padding: "10px 14px",
+                borderRadius: 12,
+                border: 0,
+                fontWeight: 800,
+                cursor: saving || !inspection ? "not-allowed" : "pointer",
+                background: saving ? "#c7d2fe" : ui.primary,
+                color: "#fff",
+                boxShadow: "0 6px 16px rgba(63,81,181,.25)",
+                transition: "background .2s ease",
+              }}
+            >
+              {saving ? "Saving..." : "Save inference threshold"}
+            </button>
+            {saveError && (
+              <div style={{ color: ui.danger, fontWeight: 700, marginTop: 8 }}>{saveError}</div>
+            )}
+            {saveSuccess && !saveError && (
+              <div style={{ color: ui.ok, fontWeight: 700, marginTop: 8 }}>{saveSuccess}</div>
+            )}
           </div>
 
           <input
